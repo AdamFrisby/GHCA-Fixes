@@ -162,6 +162,37 @@ public class CopilotAgentTrackerTests
         Assert.Equal(TimeSpan.FromMinutes(2), successDelay);
     }
 
+    [Fact]
+    public async Task ConcurrencyIsTrackedAcrossAllPRs()
+    {
+        // Arrange - Start agents for different PRs
+        await _tracker.TrackAgentStartedAsync(100);  // PR #100
+        await _tracker.TrackAgentStartedAsync(200);  // PR #200
+        
+        // Assert - Should have 2 active agents total across all PRs
+        Assert.Equal(2, _tracker.GetActiveAgentCount());
+        
+        // Assert - Should not be able to start another agent (max is 2)
+        var canStartAnother = await _tracker.CanStartNewAgentAsync();
+        Assert.False(canStartAnother);
+        
+        // Act - Finish one agent
+        await _tracker.TrackAgentFinishedAsync(100, success: true);
+        
+        // Assert - Should now have 1 active agent and be able to start another
+        Assert.Equal(1, _tracker.GetActiveAgentCount());
+        var canStartAfterFinish = await _tracker.CanStartNewAgentAsync();
+        Assert.True(canStartAfterFinish);
+        
+        // Act - Start agent for a third PR
+        await _tracker.TrackAgentStartedAsync(300);  // PR #300
+        
+        // Assert - Should now have 2 active agents again (PR #200 and #300)
+        Assert.Equal(2, _tracker.GetActiveAgentCount());
+        var canStartWhenFull = await _tracker.CanStartNewAgentAsync();
+        Assert.False(canStartWhenFull);
+    }
+
     private class TestLogger<T> : ILogger<T>
     {
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;

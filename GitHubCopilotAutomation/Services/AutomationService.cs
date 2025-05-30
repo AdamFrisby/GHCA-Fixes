@@ -53,8 +53,8 @@ public class AutomationService : IAutomationService
                 // Check if we can start a new agent for this PR
                 if (!await _agentTracker.CanStartNewAgentAsync())
                 {
-                    _logger.LogInformation("Maximum concurrent agents ({MaxCount}) reached. Skipping remaining PRs", 
-                        _config.MaxConcurrentAgents);
+                    _logger.LogInformation("Maximum concurrent agents ({MaxCount}) reached across all PRs. Current active: {ActiveCount}. Skipping remaining PRs", 
+                        _config.MaxConcurrentAgents, _agentTracker.GetActiveAgentCount());
                     break;
                 }
 
