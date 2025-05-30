@@ -160,25 +160,21 @@ public class GitHubService : IGitHubService
                 status.LastEventSource = $"Comment by {lastCopilotComment.User?.Login}";
                 status.HasRecentActivity = (DateTime.UtcNow - lastCopilotComment.CreatedAt.DateTime).TotalMinutes < 30;
 
-                // Detect work state from comment content
+                // Detect work state from comment content (fallback heuristics)
                 var body = lastCopilotComment.Body?.ToLowerInvariant() ?? "";
                 
-                if (body.Contains("copilot_work_started") || 
-                    body.Contains("starting work") || 
+                if (body.Contains("starting work") || 
                     body.Contains("beginning to work"))
                 {
                     status.State = CopilotWorkState.Started;
                 }
-                else if (body.Contains("copilot_work_finished_failure") || 
-                         body.Contains("copilot_work_finished_error") ||
-                         body.Contains("failed") || 
+                else if (body.Contains("failed") || 
                          body.Contains("error") || 
                          body.Contains("unable"))
                 {
                     status.State = CopilotWorkState.FinishedWithFailure;
                 }
-                else if (body.Contains("copilot_work_finished") || 
-                         body.Contains("completed") || 
+                else if (body.Contains("completed") || 
                          body.Contains("finished") || 
                          body.Contains("done"))
                 {
@@ -190,7 +186,7 @@ public class GitHubService : IGitHubService
                 }
             }
 
-            // Also check timeline events for Copilot-related activities
+            // Check timeline events for Copilot work state events
             var recentEvents = events
                 .Where(e => e.CreatedAt > DateTime.UtcNow.AddHours(-24))
                 .OrderByDescending(e => e.CreatedAt)
@@ -202,6 +198,21 @@ public class GitHubService : IGitHubService
                 if (eventItem.Actor != null && 
                     GitHubUtils.IsCopilotUser(eventItem.Actor.Login, eventItem.Actor.Id, _config.CopilotUsernames, _config.CopilotUserId))
                 {
+                    // Check for specific Copilot work state events
+                    var eventType = eventItem.Event.ToString();
+                    switch (eventType)
+                    {
+                        case "copilot_work_started":
+                            status.State = CopilotWorkState.Started;
+                            break;
+                        case "copilot_work_finished":
+                            status.State = CopilotWorkState.Finished;
+                            break;
+                        case "copilot_work_finished_failure":
+                            status.State = CopilotWorkState.FinishedWithFailure;
+                            break;
+                    }
+
                     if (eventItem.CreatedAt.DateTime > (status.LastEventTime ?? DateTime.MinValue))
                     {
                         status.LastEventTime = eventItem.CreatedAt.DateTime;
