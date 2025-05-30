@@ -11,4 +11,10 @@ public class AppConfig
     public double BackoffMultiplier { get; set; } = 2.0;
     public string[] CopilotUsernames { get; set; } = { "@copilot", "@apps/copilot-pull-request-reviewer" };
     public long CopilotUserId { get; set; } = 198982749;
+    
+    // Copilot agent concurrency and backoff settings
+    public int MaxConcurrentAgents { get; set; } = 2;
+    public int AgentStartValidationMinutes { get; set; } = 5;
+    public int CopilotBackoffIncrementMinutes { get; set; } = 15;
+    public int CopilotSuccessResetMinutes { get; set; } = 2;
 }

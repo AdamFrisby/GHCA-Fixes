@@ -13,12 +13,18 @@ public interface IAutomationService
 public class AutomationService : IAutomationService
 {
     private readonly IGitHubService _gitHubService;
+    private readonly ICopilotAgentTracker _agentTracker;
     private readonly AppConfig _config;
     private readonly ILogger<AutomationService> _logger;
 
-    public AutomationService(IGitHubService gitHubService, IOptions<AppConfig> config, ILogger<AutomationService> logger)
+    public AutomationService(
+        IGitHubService gitHubService, 
+        ICopilotAgentTracker agentTracker,
+        IOptions<AppConfig> config, 
+        ILogger<AutomationService> logger)
     {
         _gitHubService = gitHubService;
+        _agentTracker = agentTracker;
         _config = config.Value;
         _logger = logger;
     }
@@ -27,11 +33,31 @@ public class AutomationService : IAutomationService
     {
         try
         {
+            // Check if we can proceed with agent management
+            var backoffDelay = await _agentTracker.GetBackoffDelayAsync();
+            if (backoffDelay > TimeSpan.Zero)
+            {
+                _logger.LogInformation("Agent backoff in effect. Delaying for {DelayMinutes} minutes", backoffDelay.TotalMinutes);
+                return;
+            }
+
             var pullRequests = await _gitHubService.GetDraftPullRequestsAsync();
-            _logger.LogInformation("Found {Count} draft pull requests assigned to Copilot", pullRequests.Count());
+            _logger.LogInformation("Found {Count} draft pull requests assigned to Copilot. Active agents: {ActiveCount}", 
+                pullRequests.Count(), _agentTracker.GetActiveAgentCount());
+
+            // Update agent states based on current PR statuses
+            await UpdateAgentStatesAsync(pullRequests);
 
             foreach (var pr in pullRequests)
             {
+                // Check if we can start a new agent for this PR
+                if (!await _agentTracker.CanStartNewAgentAsync())
+                {
+                    _logger.LogInformation("Maximum concurrent agents ({MaxCount}) reached across all PRs. Current active: {ActiveCount}. Skipping remaining PRs", 
+                        _config.MaxConcurrentAgents, _agentTracker.GetActiveAgentCount());
+                    break;
+                }
+
                 await ProcessSinglePullRequestAsync(pr, interactive);
             }
         }
@@ -39,6 +65,30 @@ public class AutomationService : IAutomationService
         {
             _logger.LogError(ex, "Error processing pull requests");
             throw;
+        }
+    }
+
+    private async Task UpdateAgentStatesAsync(IEnumerable<PullRequest> pullRequests)
+    {
+        foreach (var pr in pullRequests)
+        {
+            try
+            {
+                var workStatus = await _gitHubService.DetectCopilotWorkStatusAsync(pr.Number);
+                
+                if (workStatus.State == CopilotWorkState.Finished)
+                {
+                    await _agentTracker.TrackAgentFinishedAsync(pr.Number, success: true);
+                }
+                else if (workStatus.State == CopilotWorkState.FinishedWithFailure)
+                {
+                    await _agentTracker.TrackAgentFinishedAsync(pr.Number, success: false);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to update agent state for PR #{Number}", pr.Number);
+            }
         }
     }
 
@@ -56,12 +106,8 @@ public class AutomationService : IAutomationService
                 return;
             }
 
-            // Get timeline events
-            var events = await _gitHubService.GetPullRequestTimelineAsync(pr.Number);
-            
-            // For now, we'll work with generic events and look for specific patterns
-            // Note: The exact "copilot_work_finished_failure" and "copilot_work_finished" events
-            // may not be standard GitHub events. We'll check for comments from copilot instead
+            // Check current Copilot work status
+            var workStatus = await _gitHubService.DetectCopilotWorkStatusAsync(pr.Number);
             var comments = await _gitHubService.GetPullRequestCommentsAsync(pr.Number);
             
             var lastCopilotComment = comments
@@ -71,24 +117,18 @@ public class AutomationService : IAutomationService
                 .OrderByDescending(c => c.CreatedAt)
                 .FirstOrDefault();
 
-            // Check for failure indicators in the last copilot comment or PR state
-            bool indicatesFailure = lastCopilotComment?.Body?.Contains("failed") == true ||
-                                   lastCopilotComment?.Body?.Contains("error") == true ||
-                                   lastCopilotComment?.Body?.Contains("unable") == true;
-
-            bool indicatesCompletion = lastCopilotComment?.Body?.Contains("completed") == true ||
-                                      lastCopilotComment?.Body?.Contains("finished") == true ||
-                                      lastCopilotComment?.Body?.Contains("done") == true;
-
+            // Determine action based on Copilot work status
             string? commentToPost = null;
             string action = "";
+            bool willStartNewAgent = false;
 
-            if (indicatesFailure)
+            if (workStatus.State == CopilotWorkState.FinishedWithFailure)
             {
                 commentToPost = "@copilot please continue";
                 action = "Request Copilot to continue after failure";
+                willStartNewAgent = true;
             }
-            else if (indicatesCompletion)
+            else if (workStatus.State == CopilotWorkState.Finished)
             {
                 // Check if we've already requested review too many times
                 var reviewRequestCount = comments.Count(c => 
@@ -98,6 +138,7 @@ public class AutomationService : IAutomationService
                 {
                     commentToPost = $"@copilot Please review the code in this PR against the original specification in #{linkedIssue.Number}, and verify your fix completely satisfies this issue.";
                     action = $"Request Copilot to review against issue #{linkedIssue.Number} (attempt {reviewRequestCount + 1}/{_config.MaxRetries})";
+                    willStartNewAgent = true;
                 }
                 else
                 {
@@ -105,14 +146,9 @@ public class AutomationService : IAutomationService
                     return;
                 }
             }
-            else if (lastCopilotComment == null)
+            else if (workStatus.State == CopilotWorkState.Unknown || workStatus.State == CopilotWorkState.Started)
             {
-                _logger.LogInformation("No copilot activity found for PR #{Number}", pr.Number);
-                return;
-            }
-            else
-            {
-                _logger.LogInformation("No actionable copilot status found for PR #{Number}", pr.Number);
+                _logger.LogInformation("No actionable copilot status found for PR #{Number} (State: {State})", pr.Number, workStatus.State);
                 return;
             }
 
@@ -124,6 +160,11 @@ public class AutomationService : IAutomationService
                     {
                         await _gitHubService.PostCommentAsync(pr.Number, commentToPost);
                         _logger.LogInformation("Posted comment to PR #{Number}", pr.Number);
+                        
+                        if (willStartNewAgent)
+                        {
+                            await _agentTracker.TrackAgentStartedAsync(pr.Number);
+                        }
                     }
                     else
                     {
@@ -134,6 +175,11 @@ public class AutomationService : IAutomationService
                 {
                     await _gitHubService.PostCommentAsync(pr.Number, commentToPost);
                     _logger.LogInformation("Posted comment to PR #{Number}", pr.Number);
+                    
+                    if (willStartNewAgent)
+                    {
+                        await _agentTracker.TrackAgentStartedAsync(pr.Number);
+                    }
                 }
             }
         }

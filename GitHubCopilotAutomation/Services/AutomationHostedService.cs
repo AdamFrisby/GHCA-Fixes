@@ -8,16 +8,19 @@ namespace GitHubCopilotAutomation.Services;
 public class AutomationHostedService : BackgroundService
 {
     private readonly IAutomationService _automationService;
+    private readonly ICopilotAgentTracker _agentTracker;
     private readonly AppConfig _config;
     private readonly ILogger<AutomationHostedService> _logger;
     private int _retryCount = 0;
 
     public AutomationHostedService(
         IAutomationService automationService,
+        ICopilotAgentTracker agentTracker,
         IOptions<AppConfig> config,
         ILogger<AutomationHostedService> logger)
     {
         _automationService = automationService;
+        _agentTracker = agentTracker;
         _config = config.Value;
         _logger = logger;
     }
@@ -30,7 +33,18 @@ public class AutomationHostedService : BackgroundService
         {
             try
             {
-                _logger.LogInformation("Starting pull request scan...");
+                // Check Copilot agent backoff before proceeding
+                var copilotBackoffDelay = await _agentTracker.GetBackoffDelayAsync();
+                if (copilotBackoffDelay > TimeSpan.Zero)
+                {
+                    _logger.LogInformation("Copilot agent backoff in effect. Waiting {DelayMinutes} minutes before next scan", 
+                        copilotBackoffDelay.TotalMinutes);
+                    await Task.Delay(copilotBackoffDelay, stoppingToken);
+                    continue;
+                }
+
+                _logger.LogInformation("Starting pull request scan... Active agents: {ActiveCount}", 
+                    _agentTracker.GetActiveAgentCount());
                 await _automationService.ProcessPullRequestsAsync(interactive: false);
                 _retryCount = 0; // Reset retry count on success
                 
