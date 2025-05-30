@@ -2,7 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Octokit;
 using GitHubCopilotAutomation.Models;
-using System.Text.RegularExpressions;
+using GitHubCopilotAutomation.Utils;
 
 namespace GitHubCopilotAutomation.Services;
 
@@ -54,7 +54,7 @@ public class GitHubService : IGitHubService
         try
         {
             // Look for "Fixes #123" pattern in PR body
-            var issueNumber = ExtractIssueNumber(pullRequest.Body);
+            var issueNumber = GitHubUtils.ExtractIssueNumber(pullRequest.Body);
             if (issueNumber.HasValue)
             {
                 return await _client.Issue.Get(_config.Owner, _config.Repository, issueNumber.Value);
@@ -115,37 +115,18 @@ public class GitHubService : IGitHubService
     {
         // Check if any assignee matches copilot criteria
         if (pullRequest.Assignees?.Any(assignee => 
-            _config.CopilotUsernames.Contains($"@{assignee.Login}") || 
-            assignee.Id == _config.CopilotUserId) == true)
+            GitHubUtils.IsCopilotUser(assignee.Login, assignee.Id, _config.CopilotUsernames, _config.CopilotUserId)) == true)
         {
             return true;
         }
 
         // Check if author is copilot
         if (pullRequest.User != null && 
-            (_config.CopilotUsernames.Contains($"@{pullRequest.User.Login}") || 
-             pullRequest.User.Id == _config.CopilotUserId))
+            GitHubUtils.IsCopilotUser(pullRequest.User.Login, pullRequest.User.Id, _config.CopilotUsernames, _config.CopilotUserId))
         {
             return true;
         }
 
         return false;
-    }
-
-    private int? ExtractIssueNumber(string? text)
-    {
-        if (string.IsNullOrEmpty(text))
-            return null;
-
-        // Look for patterns like "Fixes #123", "Closes #456", etc.
-        var pattern = @"(?:Fixes|Closes|Resolves)\s+#(\d+)";
-        var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase);
-        
-        if (match.Success && int.TryParse(match.Groups[1].Value, out int issueNumber))
-        {
-            return issueNumber;
-        }
-
-        return null;
     }
 }
