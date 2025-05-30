@@ -106,6 +106,7 @@ static IHost CreateHost(string? configPath, string? token, string? owner, string
             });
 
             services.AddSingleton<IGitHubService, GitHubService>();
+            services.AddSingleton<ICopilotAgentTracker, CopilotAgentTracker>();
             services.AddSingleton<IAutomationService, AutomationService>();
             
             if (serviceMode)

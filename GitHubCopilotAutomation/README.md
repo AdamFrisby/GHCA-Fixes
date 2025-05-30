@@ -9,6 +9,8 @@ A C# service application that automates GitHub Copilot workflow management by mo
 - **Rate Limiting**: Automatic exponential backoff for GitHub API rate limits
 - **Configurable**: JSON configuration with command-line overrides
 - **Copilot Integration**: Detects PRs assigned to Copilot and manages their workflow
+- **Agent Concurrency Management**: Limits concurrent Copilot agents to prevent overload
+- **Smart Backoff**: Exponential backoff on agent failures with success-based reset
 
 ## Installation
 
@@ -31,7 +33,11 @@ Create an `appsettings.json` file or use command-line arguments:
   "BaseDelaySeconds": 60,
   "BackoffMultiplier": 2.0,
   "CopilotUsernames": ["@copilot", "@apps/copilot-pull-request-reviewer"],
-  "CopilotUserId": 198982749
+  "CopilotUserId": 198982749,
+  "MaxConcurrentAgents": 2,
+  "AgentStartValidationMinutes": 5,
+  "CopilotBackoffIncrementMinutes": 15,
+  "CopilotSuccessResetMinutes": 2
 }
 ```
 
@@ -46,6 +52,10 @@ Create an `appsettings.json` file or use command-line arguments:
 - **BackoffMultiplier**: Multiplier for exponential backoff (default: 2.0)
 - **CopilotUsernames**: Array of Copilot usernames to detect
 - **CopilotUserId**: Numeric ID of Copilot user
+- **MaxConcurrentAgents**: Maximum number of concurrent Copilot agents (default: 2)
+- **AgentStartValidationMinutes**: Time to wait to validate agent startup (default: 5 minutes)
+- **CopilotBackoffIncrementMinutes**: Minutes to add per consecutive failure (default: 15 minutes)
+- **CopilotSuccessResetMinutes**: Backoff after first success (default: 2 minutes, 0 after second success)
 
 ## Usage
 
@@ -86,11 +96,38 @@ Service mode additionally supports:
 
 1. **Scans Draft PRs**: Finds open draft pull requests assigned to Copilot
 2. **Detects Linked Issues**: Extracts issue numbers from PR descriptions (e.g., "Fixes #123")
-3. **Analyzes Copilot Activity**: Checks comments for completion or failure indicators
-4. **Takes Action**:
-   - If failure detected: Posts "@copilot please continue"
+3. **Manages Agent Concurrency**: Tracks active Copilot agents and limits concurrent work to 2 agents maximum
+4. **Analyzes Copilot Work Status**: Detects work events and comment patterns to determine agent state
+5. **Applies Backoff Strategy**: Implements exponential backoff on failures (15 minutes per failure) and resets on success
+6. **Takes Action**:
+   - If failure detected: Posts "@copilot please continue" (respecting concurrency limits)
    - If completion detected: Posts review request (up to MaxRetries times)
-5. **Rate Limiting**: Implements exponential backoff for API rate limits
+   - Waits 5 minutes after starting agents to validate successful startup
+7. **Rate Limiting**: Implements exponential backoff for API rate limits
+
+## Copilot Agent Management
+
+The system includes sophisticated agent management to prevent overloading Copilot and ensure reliable operation:
+
+### Concurrency Control
+- **Maximum Agents**: Limits concurrent Copilot agents to 2 by default (configurable)
+- **Queue Management**: Additional requests wait until agent slots become available
+- **Real-time Tracking**: Monitors active agents across all pull requests
+
+### Failure Handling & Backoff
+- **Progressive Backoff**: Each consecutive failure increases wait time by 15 minutes
+- **Pressure Release**: Prevents system overload during high failure periods
+- **Failure Detection**: Monitors comments and events for failure indicators
+
+### Success Recovery
+- **Smart Reset**: First success reduces backoff to 2 minutes
+- **Full Recovery**: Two consecutive successes eliminate backoff entirely
+- **Performance Optimization**: Quickly returns to normal operation after issues resolve
+
+### Agent Validation
+- **Startup Monitoring**: 5-minute validation period after agent starts
+- **Health Checks**: Ensures agents are functioning properly before considering them active
+- **Graceful Degradation**: Handles failed agent starts without blocking the system
 
 ## Requirements
 

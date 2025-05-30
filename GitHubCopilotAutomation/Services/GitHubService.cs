@@ -13,6 +13,7 @@ public interface IGitHubService
     Task<IEnumerable<IssueEvent>> GetPullRequestTimelineAsync(int pullRequestNumber);
     Task PostCommentAsync(int pullRequestNumber, string comment);
     Task<IEnumerable<IssueComment>> GetPullRequestCommentsAsync(int pullRequestNumber);
+    Task<CopilotWorkStatus> DetectCopilotWorkStatusAsync(int pullRequestNumber);
 }
 
 public class GitHubService : IGitHubService
@@ -128,5 +129,97 @@ public class GitHubService : IGitHubService
         }
 
         return false;
+    }
+
+    public async Task<CopilotWorkStatus> DetectCopilotWorkStatusAsync(int pullRequestNumber)
+    {
+        try
+        {
+            var comments = await GetPullRequestCommentsAsync(pullRequestNumber);
+            var events = await GetPullRequestTimelineAsync(pullRequestNumber);
+
+            var status = new CopilotWorkStatus
+            {
+                State = CopilotWorkState.Unknown,
+                HasRecentActivity = false
+            };
+
+            // Check comments for Copilot work indicators
+            var copilotComments = comments
+                .Where(c => c.User != null && 
+                           (_config.CopilotUsernames.Contains($"@{c.User.Login}") || 
+                            c.User.Id == _config.CopilotUserId))
+                .OrderByDescending(c => c.CreatedAt)
+                .ToList();
+
+            var lastCopilotComment = copilotComments.FirstOrDefault();
+            
+            if (lastCopilotComment != null)
+            {
+                status.LastEventTime = lastCopilotComment.CreatedAt.DateTime;
+                status.LastEventSource = $"Comment by {lastCopilotComment.User?.Login}";
+                status.HasRecentActivity = (DateTime.UtcNow - lastCopilotComment.CreatedAt.DateTime).TotalMinutes < 30;
+
+                // Detect work state from comment content
+                var body = lastCopilotComment.Body?.ToLowerInvariant() ?? "";
+                
+                if (body.Contains("copilot_work_started") || 
+                    body.Contains("starting work") || 
+                    body.Contains("beginning to work"))
+                {
+                    status.State = CopilotWorkState.Started;
+                }
+                else if (body.Contains("copilot_work_finished_failure") || 
+                         body.Contains("copilot_work_finished_error") ||
+                         body.Contains("failed") || 
+                         body.Contains("error") || 
+                         body.Contains("unable"))
+                {
+                    status.State = CopilotWorkState.FinishedWithFailure;
+                }
+                else if (body.Contains("copilot_work_finished") || 
+                         body.Contains("completed") || 
+                         body.Contains("finished") || 
+                         body.Contains("done"))
+                {
+                    status.State = CopilotWorkState.Finished;
+                }
+                else
+                {
+                    status.State = CopilotWorkState.InProgress;
+                }
+            }
+
+            // Also check timeline events for Copilot-related activities
+            var recentEvents = events
+                .Where(e => e.CreatedAt > DateTime.UtcNow.AddHours(-24))
+                .OrderByDescending(e => e.CreatedAt)
+                .ToList();
+
+            foreach (var eventItem in recentEvents)
+            {
+                // Check if the event is from Copilot
+                if (eventItem.Actor != null && 
+                    GitHubUtils.IsCopilotUser(eventItem.Actor.Login, eventItem.Actor.Id, _config.CopilotUsernames, _config.CopilotUserId))
+                {
+                    if (eventItem.CreatedAt.DateTime > (status.LastEventTime ?? DateTime.MinValue))
+                    {
+                        status.LastEventTime = eventItem.CreatedAt.DateTime;
+                        status.LastEventSource = $"Event: {eventItem.Event} by {eventItem.Actor.Login}";
+                        status.HasRecentActivity = (DateTime.UtcNow - eventItem.CreatedAt.DateTime).TotalMinutes < 30;
+                    }
+                }
+            }
+
+            _logger.LogDebug("Detected Copilot work status for PR #{PullRequestNumber}: {State}, Last event: {LastEvent}", 
+                pullRequestNumber, status.State, status.LastEventSource);
+
+            return status;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to detect Copilot work status for PR {PullRequestNumber}", pullRequestNumber);
+            return new CopilotWorkStatus { State = CopilotWorkState.Unknown };
+        }
     }
 }
